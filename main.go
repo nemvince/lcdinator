@@ -79,6 +79,7 @@ func main() {
 	globalNetIfIndex = new(int32)
 	globalServiceIndex = new(int32)
 	globalServiceAction = new(int32)
+	globalServiceViewOffset = new(int32) // <-- Add this line to initialize scrolling
 	globalRequestedScreen = &requestedScreen
 
 	keyHandler := &KeyHandler{

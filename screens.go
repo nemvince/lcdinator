@@ -22,7 +22,8 @@ var globalInDialog *int32
 var globalDialogType *int32
 var globalNetIfIndex *int32
 var globalServiceIndex *int32
-var globalServiceAction *int32 // 0 = none, 1 = stop, 2 = restart
+var globalServiceAction *int32     // 0 = none, 1 = stop, 2 = restart
+var globalServiceViewOffset *int32 // Tracks the first visible service index
 var globalDialogResult *int32
 var globalRequestedScreen *int32
 
@@ -170,42 +171,131 @@ func (s *ServiceManagerScreen) Draw(fb *image.Gray) {
 		Face: face,
 	}
 	services := GetRunningServices()
-	idx := 0
+	numServices := len(services)
+
+	selectedIndex := 0
 	if globalServiceIndex != nil {
-		idx = int(*globalServiceIndex)
+		selectedIndex = int(atomic.LoadInt32(globalServiceIndex))
 	}
-	if len(services) == 0 {
+
+	viewOffset := 0
+	if globalServiceViewOffset != nil { // Ensure it's initialized
+		viewOffset = int(atomic.LoadInt32(globalServiceViewOffset))
+	}
+
+	if numServices == 0 {
 		d.Dot = fixed.P(0, 16)
 		d.DrawString("No services found")
 		return
 	}
-	if idx < 0 || idx >= len(services) {
-		idx = 0
+
+	// Clamp selectedIndex (should be managed by HandleKey, but good for safety here too)
+	if selectedIndex < 0 {
+		selectedIndex = 0
 	}
-	// Draw menu of services
-	for i, svc := range services {
-		y := 12 + i*16
-		if y > 60 {
-			break
-		} // fit max 4 on screen
-		if i == idx {
-			d.Dot = fixed.P(0, y)
-			d.DrawString("> " + svc)
-		} else {
-			d.Dot = fixed.P(0, y)
-			d.DrawString("  " + svc)
+	if selectedIndex >= numServices {
+		selectedIndex = numServices - 1
+	}
+
+	const maxItemsOnScreen = 3
+	const itemHeight = 16
+	const listStartY = 12 // Y position where the list of items starts
+
+	// Adjust viewOffset to ensure it's valid and the selected item is visible.
+	if numServices <= maxItemsOnScreen {
+		viewOffset = 0
+	} else {
+		maxPossibleViewOffset := numServices - maxItemsOnScreen
+		// Ensure selected item is visible
+		if selectedIndex < viewOffset {
+			viewOffset = selectedIndex
+		} else if selectedIndex >= viewOffset+maxItemsOnScreen {
+			viewOffset = selectedIndex - maxItemsOnScreen + 1
+		}
+		// Clamp viewOffset to its valid range
+		if viewOffset < 0 {
+			viewOffset = 0
+		}
+		if viewOffset > maxPossibleViewOffset {
+			viewOffset = maxPossibleViewOffset
 		}
 	}
+	if globalServiceViewOffset != nil { // Store the corrected/validated viewOffset
+		atomic.StoreInt32(globalServiceViewOffset, int32(viewOffset))
+	}
+
+	// Draw menu of services
+	for i := 0; i < maxItemsOnScreen; i++ {
+		actualServiceIndex := viewOffset + i
+		if actualServiceIndex >= numServices {
+			break // No more services to draw
+		}
+		svc := services[actualServiceIndex]
+		yPos := listStartY + i*itemHeight
+
+		prefix := "  "
+		if actualServiceIndex == selectedIndex {
+			prefix = "> "
+		}
+		// Truncate service name if too long
+		maxServiceNameLen := (fb.Bounds().Max.X / 7) - len(prefix) - 3 // Approx chars, 7px font, space for scrollbar
+		if len(svc) > maxServiceNameLen && maxServiceNameLen > 0 {
+			svc = svc[:maxServiceNameLen-1] + "…"
+		}
+
+		d.Dot = fixed.P(0, yPos)
+		d.DrawString(prefix + svc)
+	}
+
+	// Draw scrollbar
+	itemAreaHeight := maxItemsOnScreen * itemHeight
+	scrollbarX := fb.Bounds().Max.X - 3 // Position for a 2px wide scrollbar
+
+	if numServices > maxItemsOnScreen {
+		thumbHeightRatio := float64(maxItemsOnScreen) / float64(numServices)
+		thumbHeightPixels := int(thumbHeightRatio * float64(itemAreaHeight))
+		if thumbHeightPixels < 3 { // Min thumb height
+			thumbHeightPixels = 3
+		}
+		if thumbHeightPixels > itemAreaHeight {
+			thumbHeightPixels = itemAreaHeight
+		}
+
+		scrollableRangePixels := itemAreaHeight - thumbHeightPixels
+		totalScrollableItemPositions := numServices - maxItemsOnScreen
+
+		var thumbTopRelativeY int
+		if totalScrollableItemPositions > 0 {
+			thumbTopRelativeY = (viewOffset * scrollableRangePixels) / totalScrollableItemPositions
+		} else {
+			thumbTopRelativeY = 0
+		}
+		thumbAbsoluteTopY := listStartY + thumbTopRelativeY
+
+		for yOffset := 0; yOffset < thumbHeightPixels; yOffset++ {
+			pixelY := thumbAbsoluteTopY + yOffset
+			if pixelY >= listStartY && pixelY < listStartY+itemAreaHeight {
+				fb.Set(scrollbarX, pixelY, image.Black)
+				fb.Set(scrollbarX+1, pixelY, image.Black)
+			}
+		}
+	}
+
 	// Draw action dialog if needed
-	if globalServiceAction != nil && *globalServiceAction != 0 {
+	if globalServiceAction != nil && atomic.LoadInt32(globalServiceAction) != 0 {
 		action := ""
-		if *globalServiceAction == 1 {
+		currentAction := atomic.LoadInt32(globalServiceAction)
+		if currentAction == 1 {
 			action = "Stop"
-		} else if *globalServiceAction == 2 {
+		} else if currentAction == 2 {
 			action = "Restart"
 		}
-		d.Dot = fixed.P(0, 60)
-		d.DrawString(fmt.Sprintf("%s %s? (OK/ESC)", action, services[idx]))
+		if selectedIndex >= 0 && selectedIndex < numServices {
+			d.Dot = fixed.P(0, 60)
+			d.DrawString(fmt.Sprintf("%s %s? (OK/ESC)", action, services[selectedIndex]))
+		} else {
+			atomic.StoreInt32(globalServiceAction, 0) // Clear action if index is bad
+		}
 	}
 }
 
@@ -304,20 +394,31 @@ func (s *NetworkInfoScreen) HandleKey(key byte) bool {
 func (s *ServiceManagerScreen) HandleKey(key byte) bool {
 	changed := false
 	services := GetRunningServices()
-	if len(services) == 0 {
+	numServices := len(services)
+
+	if globalServiceIndex == nil || globalServiceViewOffset == nil || globalServiceAction == nil {
 		return false
 	}
-	idx := int(*globalServiceIndex)
-	if idx < 0 || idx >= len(services) {
-		idx = 0
+
+	selectedIndexForDialog := int(atomic.LoadInt32(globalServiceIndex))
+
+	if numServices == 0 && atomic.LoadInt32(globalServiceAction) == 0 {
+		return false
 	}
+
+	const maxItemsOnScreen = 3
+
 	if atomic.LoadInt32(globalServiceAction) != 0 {
 		switch key {
 		case KEY_ENTER:
-			if atomic.LoadInt32(globalServiceAction) == 1 {
-				go ServiceAction(services[idx], "stop")
-			} else if atomic.LoadInt32(globalServiceAction) == 2 {
-				go ServiceAction(services[idx], "restart")
+			if selectedIndexForDialog >= 0 && selectedIndexForDialog < numServices {
+				actionType := atomic.LoadInt32(globalServiceAction)
+				serviceToActOn := services[selectedIndexForDialog]
+				if actionType == 1 { // Stop
+					go ServiceAction(serviceToActOn, "stop")
+				} else if actionType == 2 { // Restart
+					go ServiceAction(serviceToActOn, "restart")
+				}
 			}
 			atomic.StoreInt32(globalServiceAction, 0)
 			changed = true
@@ -327,23 +428,77 @@ func (s *ServiceManagerScreen) HandleKey(key byte) bool {
 		}
 		return changed
 	}
+
+	currentSelectedIndex := int(atomic.LoadInt32(globalServiceIndex))
+	currentViewOffset := int(atomic.LoadInt32(globalServiceViewOffset))
+
 	switch key {
 	case KEY_UP:
-		if *globalServiceIndex > 0 {
-			atomic.AddInt32(globalServiceIndex, -1)
+		if currentSelectedIndex > 0 {
+			newSelectedIndex := currentSelectedIndex - 1
+			atomic.StoreInt32(globalServiceIndex, int32(newSelectedIndex))
+			if newSelectedIndex < currentViewOffset {
+				atomic.StoreInt32(globalServiceViewOffset, int32(newSelectedIndex))
+			}
 			changed = true
 		}
 	case KEY_DOWN:
-		if *globalServiceIndex < int32(len(services))-1 {
-			atomic.AddInt32(globalServiceIndex, 1)
+		if currentSelectedIndex < numServices-1 {
+			newSelectedIndex := currentSelectedIndex + 1
+			atomic.StoreInt32(globalServiceIndex, int32(newSelectedIndex))
+			if newSelectedIndex >= currentViewOffset+maxItemsOnScreen {
+				atomic.StoreInt32(globalServiceViewOffset, int32(newSelectedIndex-maxItemsOnScreen+1))
+			}
 			changed = true
 		}
-	case KEY_LEFT:
-		atomic.StoreInt32(globalServiceAction, 1)
-		changed = true
-	case KEY_RIGHT:
-		atomic.StoreInt32(globalServiceAction, 2)
-		changed = true
+	case KEY_LEFT: // Trigger Stop action
+		if numServices > 0 && currentSelectedIndex >= 0 && currentSelectedIndex < numServices {
+			atomic.StoreInt32(globalServiceAction, 1) // 1 for Stop
+			changed = true
+		}
+	case KEY_RIGHT: // Trigger Restart action
+		if numServices > 0 && currentSelectedIndex >= 0 && currentSelectedIndex < numServices {
+			atomic.StoreInt32(globalServiceAction, 2) // 2 for Restart
+			changed = true
+		}
+	}
+
+	// Final clamping and validation after potential changes
+	if numServices == 0 {
+		atomic.StoreInt32(globalServiceIndex, 0)
+		atomic.StoreInt32(globalServiceViewOffset, 0)
+	} else {
+		// Clamp selectedIndex
+		finalSelectedIndex := int(atomic.LoadInt32(globalServiceIndex))
+		if finalSelectedIndex >= numServices {
+			finalSelectedIndex = numServices - 1
+		}
+		if finalSelectedIndex < 0 {
+			finalSelectedIndex = 0
+		}
+		atomic.StoreInt32(globalServiceIndex, int32(finalSelectedIndex))
+
+		// Clamp viewOffset, ensuring selected item is visible
+		finalViewOffset := int(atomic.LoadInt32(globalServiceViewOffset)) // Re-read
+		if numServices <= maxItemsOnScreen {
+			finalViewOffset = 0
+		} else {
+			maxPossibleViewOffset := numServices - maxItemsOnScreen
+			// Ensure selected item is visible
+			if finalSelectedIndex < finalViewOffset {
+				finalViewOffset = finalSelectedIndex
+			} else if finalSelectedIndex >= finalViewOffset+maxItemsOnScreen {
+				finalViewOffset = finalSelectedIndex - maxItemsOnScreen + 1
+			}
+			// Clamp viewOffset itself
+			if finalViewOffset < 0 {
+				finalViewOffset = 0
+			}
+			if finalViewOffset > maxPossibleViewOffset {
+				finalViewOffset = maxPossibleViewOffset
+			}
+		}
+		atomic.StoreInt32(globalServiceViewOffset, int32(finalViewOffset))
 	}
 	return changed
 }
