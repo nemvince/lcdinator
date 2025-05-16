@@ -2,291 +2,24 @@ package main
 
 import (
 	"fmt"
-	"image"
-	"image/color"
-	"image/draw"
 	"log"
 	"os"
 	"sync/atomic"
-	"syscall"
 	"time"
 
-	"go.bug.st/serial" // External dependency: go get go.bug.st/serial
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/basicfont"
-	"golang.org/x/image/math/fixed"
+	"go.bug.st/serial"
 )
 
-const defaultSerialDevice = "/dev/ttyS1" // Default for Checkpoint 12200 / P210 on Linux
+const defaultSerialDevice = "/dev/ttyS1"
 const expectedImageWidth = 128
 const expectedImageHeight = 64
 
-// initCmd returns the init sequence for the LCD/printer
-func initCmd() []byte {
-	return []byte{0x1b, 0x40} // ESC @
-}
-
-// clearCmd returns the clear sequence for the LCD
-func clearCmd() []byte {
-	return []byte{0x0c} // FF (Form Feed)
-}
-
-// homeCmd returns the home sequence for the LCD
-func homeCmd() []byte {
-	return []byte{0x0b} // VT (Vertical Tab)
-}
-
-// findAddIdx calculates the bitmask and base index for transforming BMP row data to LCD column data.
 func findAddIdx(scanlineNumTimes16 int) (addVal int, idxBase int) {
 	scanlineGroup := scanlineNumTimes16 / (8 * 16)
 	idxBase = scanlineGroup * expectedImageWidth
 	posInScanlineGroup := (scanlineNumTimes16 % (8 * 16)) / 16
 	addVal = 1 << uint(posInScanlineGroup)
 	return
-}
-
-// Drawable is anything that can draw itself on a framebuffer.
-type Drawable interface {
-	Draw(fb *image.Gray)
-}
-
-// Display represents the LCD framebuffer and serial logic.
-type Display struct {
-	Width, Height int
-	Framebuffer   *image.Gray
-}
-
-func NewDisplay(width, height int) *Display {
-	return &Display{
-		Width:       width,
-		Height:      height,
-		Framebuffer: image.NewGray(image.Rect(0, 0, width, height)),
-	}
-}
-
-func (d *Display) Clear() {
-	draw.Draw(d.Framebuffer, d.Framebuffer.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
-}
-
-func (d *Display) DrawDrawable(dr Drawable) {
-	dr.Draw(d.Framebuffer)
-}
-
-func (d *Display) Pack() []byte {
-	bytesPerScanline := d.Width / 8
-	framebuffer := make([]byte, bytesPerScanline*d.Height)
-	for y := 0; y < d.Height; y++ {
-		flippedY := d.Height - 1 - y // vertical flip
-		for xByte := 0; xByte < bytesPerScanline; xByte++ {
-			var b byte
-			for bit := 0; bit < 8; bit++ {
-				x := xByte*8 + bit
-				if x >= d.Width {
-					continue
-				}
-				if d.Framebuffer.GrayAt(x, flippedY).Y < 128 {
-					b |= 1 << (7 - bit)
-				}
-			}
-			framebuffer[y*bytesPerScanline+xByte] = b
-		}
-	}
-	return framebuffer
-}
-
-// DrawIcon draws a small monochrome icon at (x, y) using an 8x8 bitmap.
-func DrawIcon(fb *image.Gray, x, y int, icon [8]byte) {
-	for row := 0; row < 8; row++ {
-		for col := 0; col < 8; col++ {
-			if (icon[row]>>(7-col))&1 == 1 {
-				fb.SetGray(x+col, y+row, color.Gray{Y: 0}) // Use color.Gray for black
-			}
-		}
-	}
-}
-
-var (
-	IconCPU = [8]byte{
-		0b00111100,
-		0b01000010,
-		0b10100101,
-		0b10111101,
-		0b10111101,
-		0b10100101,
-		0b01000010,
-		0b00111100,
-	}
-	IconRAM = [8]byte{
-		0b11111111,
-		0b10011001,
-		0b10111101,
-		0b10111101,
-		0b10111101,
-		0b10111101,
-		0b10011001,
-		0b11111111,
-	}
-	IconDisk = [8]byte{
-		0b00111100,
-		0b01000010,
-		0b10011001,
-		0b10111101,
-		0b10111101,
-		0b10011001,
-		0b01000010,
-		0b00111100,
-	}
-	IconClock = [8]byte{
-		0b00111100,
-		0b01000010,
-		0b10011001,
-		0b10100101,
-		0b10100001,
-		0b10011001,
-		0b01000010,
-		0b00111100,
-	}
-)
-
-type SystemInfoScreen struct{}
-
-func (s *SystemInfoScreen) Draw(fb *image.Gray) {
-	DrawIcon(fb, 0, 2, IconCPU)
-	DrawIcon(fb, 0, 18, IconRAM)
-	DrawIcon(fb, 0, 34, IconDisk)
-	DrawIcon(fb, 0, 50, IconClock)
-
-	face := basicfont.Face7x13
-	d := &font.Drawer{
-		Dst:  fb,
-		Src:  image.Black,
-		Face: face,
-	}
-
-	cpuUsage := getCPUUsage()
-	d.Dot = fixed.P(10, 12)
-	d.DrawString(fmt.Sprintf("CPU: %2.0f%%", cpuUsage))
-
-	// RAM usage
-	memUsed, memTotal := getMemInfo()
-	d.Dot = fixed.P(10, 28)
-	d.DrawString(fmt.Sprintf("RAM: %d/%d MB", memUsed, memTotal))
-
-	// Disk usage
-	diskUsed, diskTotal := getDiskInfo()
-	d.Dot = fixed.P(10, 44)
-	d.DrawString(fmt.Sprintf("DSK: %d/%d GB", diskUsed, diskTotal))
-
-	// Uptime
-	uptime := getUptime()
-	d.Dot = fixed.P(10, 60)
-	d.DrawString(fmt.Sprintf("UPT: %s", uptime))
-}
-
-func getCPUUsage() float64 {
-	f, err := os.Open("/proc/stat")
-	if err != nil {
-		return 0
-	}
-	defer f.Close()
-	var user1, nice1, system1, idle1, iowait1, irq1, softirq1, steal1 uint64
-	fmt.Fscanf(f, "cpu  %d %d %d %d %d %d %d %d", &user1, &nice1, &system1, &idle1, &iowait1, &irq1, &softirq1, &steal1)
-	total1 := user1 + nice1 + system1 + idle1 + iowait1 + irq1 + softirq1 + steal1
-	idleAll1 := idle1 + iowait1
-	time.Sleep(100 * time.Millisecond)
-	f.Seek(0, 0)
-	fmt.Fscanf(f, "cpu  %d %d %d %d %d %d %d %d", &user1, &nice1, &system1, &idle1, &iowait1, &irq1, &softirq1, &steal1)
-	total2 := user1 + nice1 + system1 + idle1 + iowait1 + irq1 + softirq1 + steal1
-	idleAll2 := idle1 + iowait1
-	deltaTotal := float64(total2 - total1)
-	deltaIdle := float64(idleAll2 - idleAll1)
-	if deltaTotal == 0 {
-		return 0
-	}
-	return 100.0 * (1.0 - deltaIdle/deltaTotal)
-}
-
-func getMemInfo() (used, total int) {
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 0, 0
-	}
-	defer f.Close()
-	var memTotal, memFree, buffers, cached int
-	scan := func() {
-		var label string
-		var value int
-		for {
-			_, err := fmt.Fscanf(f, "%s %d kB\n", &label, &value)
-			if err != nil {
-				break
-			}
-			switch label {
-			case "MemTotal:":
-				memTotal = value
-			case "MemFree:":
-				memFree = value
-			case "Buffers:":
-				buffers = value
-			case "Cached:":
-				cached = value
-			}
-		}
-	}
-	scan()
-	total = memTotal / 1024
-	used = (memTotal - memFree - buffers - cached) / 1024
-	return
-}
-
-func getDiskInfo() (used, total int) {
-	var stat syscall.Statfs_t
-	err := syscall.Statfs("/", &stat)
-	if err != nil {
-		return 0, 0
-	}
-	total = int((stat.Blocks * uint64(stat.Bsize)) / (1024 * 1024 * 1024))
-	used = int(((stat.Blocks - stat.Bfree) * uint64(stat.Bsize)) / (1024 * 1024 * 1024))
-	return
-}
-
-func getUptime() string {
-	f, err := os.Open("/proc/uptime")
-	if err != nil {
-		return "?"
-	}
-	defer f.Close()
-	var uptimeSeconds float64
-	fmt.Fscanf(f, "%f", &uptimeSeconds)
-	days := int(uptimeSeconds) / 86400
-	hours := (int(uptimeSeconds) % 86400) / 3600
-	minutes := (int(uptimeSeconds) % 3600) / 60
-	if days > 0 {
-		return fmt.Sprintf("%dd %02dh %02dm", days, hours, minutes)
-	}
-	if hours > 0 {
-		return fmt.Sprintf("%02dh %02dm", hours, minutes)
-	}
-	return fmt.Sprintf("%02dm", minutes)
-}
-
-// Example AboutScreen
-// (You can add more screens as needed)
-type AboutScreen struct{}
-
-func (s *AboutScreen) Draw(fb *image.Gray) {
-	face := basicfont.Face7x13
-	d := &font.Drawer{
-		Dst:  fb,
-		Src:  image.Black,
-		Face: face,
-	}
-	d.Dot = fixed.P(0, 12)
-	d.DrawString("LCDinator")
-	d.Dot = fixed.P(0, 28)
-	d.DrawString("by nemvince")
-	d.Dot = fixed.P(0, 60)
-	d.DrawString("version 1")
 }
 
 func main() {
@@ -324,7 +57,6 @@ func main() {
 		name string
 		draw Drawable
 	}
-	// Add more screens here as needed
 	screens := []screenDef{
 		{"System Info", &SystemInfoScreen{}},
 		{"About", &AboutScreen{}},
@@ -369,11 +101,11 @@ func main() {
 	defer ticker.Stop()
 	for {
 		if firstIteration {
-			writeSerial(initCmd())
+			writeSerial([]byte{0x1b, 0x40})
 			time.Sleep(sleepDuration)
-			writeSerial(homeCmd())
+			writeSerial([]byte{0x0b})
 			time.Sleep(sleepDuration)
-			writeSerial(clearCmd())
+			writeSerial([]byte{0x0c})
 			time.Sleep(sleepDuration)
 			firstIteration = false
 		}
@@ -422,8 +154,8 @@ func main() {
 			}
 
 			cols := make([]byte, expectedPixelDataSize)
-			for j := range bytesPerScanline {
-				for k := range expectedImageHeight {
+			for j := 0; j < bytesPerScanline; j++ {
+				for k := 0; k < expectedImageHeight; k++ {
 					scanlineBlockStartOffset := k * bytesPerScanline
 					currentByteOffsetInSource := scanlineBlockStartOffset + j
 					if currentByteOffsetInSource >= len(reorderedScanlines) {
@@ -467,26 +199,16 @@ func main() {
 				time.Sleep(sleepDuration * 100)
 			}
 
-			skipCounter := 0
-			for i := 0; i < len(cols); i += 64 {
-				skipCounter++
-				if skipCounter%2 == 0 {
-					continue
+			// Write every other 64-byte block in two passes: odd-indexed first, then even-indexed.
+			for pass := 0; pass < 2; pass++ {
+				for i := 0; i < len(cols); i += 64 {
+					if (i/64)%2 != pass {
+						continue
+					}
+					limit := min(i+64, len(cols))
+					writeSerial(cols[i:limit])
 				}
-				limit := min(i+64, len(cols))
-				writeSerial(cols[i:limit])
 			}
-
-			skipCounter = 0
-			for i := 0; i < len(cols); i += 64 {
-				skipCounter++
-				if skipCounter%2 != 0 {
-					continue
-				}
-				limit := min(i+64, len(cols))
-				writeSerial(cols[i:limit])
-			}
-
 			fmt.Printf("Screen: %s\n", screens[currentScreen].name)
 		}
 	}
