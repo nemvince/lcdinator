@@ -170,7 +170,7 @@ func (s *SystemInfoScreen) Draw(fb *image.Gray) {
 
 	// CPU usage
 	cpuUsage := getCPUUsage()
-	d.Dot = fixed.P(6, 12)
+	d.Dot = fixed.P(10, 12)
 	d.DrawString(fmt.Sprintf("CPU: %2.0f%%", cpuUsage))
 
 	// RAM usage
@@ -282,79 +282,6 @@ func getUptime() string {
 
 func main() {
 	display := NewDisplay(expectedImageWidth, expectedImageHeight)
-	display.Clear()
-
-	screen := &SystemInfoScreen{}
-	display.DrawDrawable(screen)
-
-	bytesFromFile := display.Pack()
-
-	bytesPerScanline := expectedImageWidth / 8
-	expectedPixelDataSize := bytesPerScanline * expectedImageHeight
-
-	if len(bytesFromFile) != expectedPixelDataSize {
-		log.Printf("Warning: BMP pixel data size is %d bytes. Expected %d bytes for a %dx%d monochrome image.",
-			len(bytesFromFile), expectedPixelDataSize, expectedImageWidth, expectedImageHeight)
-		if len(bytesFromFile) < expectedPixelDataSize && len(bytesFromFile)%bytesPerScanline == 0 {
-			padding := make([]byte, expectedPixelDataSize-len(bytesFromFile))
-			bytesFromFile = append(bytesFromFile, padding...)
-		} else if len(bytesFromFile) < expectedPixelDataSize {
-			log.Fatalf("Pixel data significantly smaller than expected and not a multiple of scanline size. Aborting.")
-		}
-	}
-
-	var reorderedScanlines []byte
-	numScanlinesInFile := len(bytesFromFile) / bytesPerScanline
-	for i := numScanlinesInFile - 1; i >= 0; i-- {
-		start := i * bytesPerScanline
-		end := start + bytesPerScanline
-		reorderedScanlines = append(reorderedScanlines, bytesFromFile[start:end]...)
-	}
-	if len(reorderedScanlines) > expectedPixelDataSize {
-		reorderedScanlines = reorderedScanlines[:expectedPixelDataSize]
-	}
-
-	cols := make([]byte, expectedPixelDataSize)
-	for j := 0; j < bytesPerScanline; j++ {
-		for k := 0; k < expectedImageHeight; k++ {
-			scanlineBlockStartOffset := k * bytesPerScanline
-			currentByteOffsetInSource := scanlineBlockStartOffset + j
-			if currentByteOffsetInSource >= len(reorderedScanlines) {
-				continue
-			}
-			currentByte := reorderedScanlines[currentByteOffsetInSource]
-			add, idxBase := findAddIdx(scanlineBlockStartOffset)
-			targetColBase := idxBase + (j * 8)
-			if targetColBase+7 >= len(cols) {
-				continue
-			}
-			if (currentByte & 0x80) != 0 {
-				cols[targetColBase+0] += byte(add)
-			}
-			if (currentByte & 0x40) != 0 {
-				cols[targetColBase+1] += byte(add)
-			}
-			if (currentByte & 0x20) != 0 {
-				cols[targetColBase+2] += byte(add)
-			}
-			if (currentByte & 0x10) != 0 {
-				cols[targetColBase+3] += byte(add)
-			}
-			if (currentByte & 0x08) != 0 {
-				cols[targetColBase+4] += byte(add)
-			}
-			if (currentByte & 0x04) != 0 {
-				cols[targetColBase+5] += byte(add)
-			}
-			if (currentByte & 0x02) != 0 {
-				cols[targetColBase+6] += byte(add)
-			}
-			if (currentByte & 0x01) != 0 {
-				cols[targetColBase+7] += byte(add)
-			}
-		}
-	}
-
 	serialDevice := defaultSerialDevice
 	if len(os.Args) > 1 {
 		serialDevice = os.Args[1]
@@ -384,46 +311,123 @@ func main() {
 
 	sleepDuration := 5 * time.Millisecond
 
-	writeSerial(initCmd())
-	time.Sleep(sleepDuration)
-	writeSerial(homeCmd())
-	time.Sleep(sleepDuration)
-	writeSerial(clearCmd())
-	time.Sleep(sleepDuration)
+	firstIteration := true
+	for {
+		if firstIteration {
+			writeSerial(initCmd())
+			time.Sleep(sleepDuration)
+			writeSerial(homeCmd())
+			time.Sleep(sleepDuration)
+			writeSerial(clearCmd())
+			time.Sleep(sleepDuration)
+			firstIteration = false
+		}
 
-	writeSerial([]byte{0x1B, 0x47})
-	time.Sleep(sleepDuration * 100)
+		display.Clear()
+		screen := &SystemInfoScreen{}
+		display.DrawDrawable(screen)
+		bytesFromFile := display.Pack()
 
-	skipCounter := 0
-	for i := 0; i < len(cols); i += 64 {
-		skipCounter++
-		if skipCounter%2 == 0 {
-			continue
+		bytesPerScanline := expectedImageWidth / 8
+		expectedPixelDataSize := bytesPerScanline * expectedImageHeight
+
+		if len(bytesFromFile) != expectedPixelDataSize {
+			log.Printf("Warning: BMP pixel data size is %d bytes. Expected %d bytes for a %dx%d monochrome image.",
+				len(bytesFromFile), expectedPixelDataSize, expectedImageWidth, expectedImageHeight)
+			if len(bytesFromFile) < expectedPixelDataSize && len(bytesFromFile)%bytesPerScanline == 0 {
+				padding := make([]byte, expectedPixelDataSize-len(bytesFromFile))
+				bytesFromFile = append(bytesFromFile, padding...)
+			} else if len(bytesFromFile) < expectedPixelDataSize {
+				log.Fatalf("Pixel data significantly smaller than expected and not a multiple of scanline size. Aborting.")
+			}
 		}
-		limit := i + 64
-		if limit > len(cols) {
-			limit = len(cols)
+
+		var reorderedScanlines []byte
+		numScanlinesInFile := len(bytesFromFile) / bytesPerScanline
+		for i := numScanlinesInFile - 1; i >= 0; i-- {
+			start := i * bytesPerScanline
+			end := start + bytesPerScanline
+			reorderedScanlines = append(reorderedScanlines, bytesFromFile[start:end]...)
 		}
-		for j := i; j < limit; j++ {
-			writeSerial([]byte{cols[j]})
+		if len(reorderedScanlines) > expectedPixelDataSize {
+			reorderedScanlines = reorderedScanlines[:expectedPixelDataSize]
 		}
+
+		cols := make([]byte, expectedPixelDataSize)
+		for j := 0; j < bytesPerScanline; j++ {
+			for k := 0; k < expectedImageHeight; k++ {
+				scanlineBlockStartOffset := k * bytesPerScanline
+				currentByteOffsetInSource := scanlineBlockStartOffset + j
+				if currentByteOffsetInSource >= len(reorderedScanlines) {
+					continue
+				}
+				currentByte := reorderedScanlines[currentByteOffsetInSource]
+				add, idxBase := findAddIdx(scanlineBlockStartOffset)
+				targetColBase := idxBase + (j * 8)
+				if targetColBase+7 >= len(cols) {
+					continue
+				}
+				if (currentByte & 0x80) != 0 {
+					cols[targetColBase+0] += byte(add)
+				}
+				if (currentByte & 0x40) != 0 {
+					cols[targetColBase+1] += byte(add)
+				}
+				if (currentByte & 0x20) != 0 {
+					cols[targetColBase+2] += byte(add)
+				}
+				if (currentByte & 0x10) != 0 {
+					cols[targetColBase+3] += byte(add)
+				}
+				if (currentByte & 0x08) != 0 {
+					cols[targetColBase+4] += byte(add)
+				}
+				if (currentByte & 0x04) != 0 {
+					cols[targetColBase+5] += byte(add)
+				}
+				if (currentByte & 0x02) != 0 {
+					cols[targetColBase+6] += byte(add)
+				}
+				if (currentByte & 0x01) != 0 {
+					cols[targetColBase+7] += byte(add)
+				}
+			}
+		}
+
+		writeSerial([]byte{0x1B, 0x47})
+		time.Sleep(sleepDuration * 100)
+
+		skipCounter := 0
+		for i := 0; i < len(cols); i += 64 {
+			skipCounter++
+			if skipCounter%2 == 0 {
+				continue
+			}
+			limit := i + 64
+			if limit > len(cols) {
+				limit = len(cols)
+			}
+			for j := i; j < limit; j++ {
+				writeSerial([]byte{cols[j]})
+			}
+		}
+
+		skipCounter = 0
+		for i := 0; i < len(cols); i += 64 {
+			skipCounter++
+			if skipCounter%2 != 0 {
+				continue
+			}
+			limit := i + 64
+			if limit > len(cols) {
+				limit = len(cols)
+			}
+			for j := i; j < limit; j++ {
+				writeSerial([]byte{cols[j]})
+			}
+		}
+
+		fmt.Println("System info sent to LCD.")
+		time.Sleep(time.Second)
 	}
-
-	skipCounter = 0
-	for i := 0; i < len(cols); i += 64 {
-		skipCounter++
-		if skipCounter%2 != 0 {
-			continue
-		}
-		limit := i + 64
-		if limit > len(cols) {
-			limit = len(cols)
-		}
-		for j := i; j < limit; j++ {
-			writeSerial([]byte{cols[j]})
-		}
-	}
-
-	fmt.Println("System info sent to LCD.")
-	time.Sleep(sleepDuration)
 }
