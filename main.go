@@ -72,7 +72,6 @@ func (d *Display) DrawDrawable(dr Drawable) {
 	dr.Draw(d.Framebuffer)
 }
 
-// Packs the framebuffer into the display's expected byte format (monochrome, 1bpp, bottom-up)
 func (d *Display) Pack() []byte {
 	bytesPerScanline := d.Width / 8
 	framebuffer := make([]byte, bytesPerScanline*d.Height)
@@ -106,7 +105,6 @@ func DrawIcon(fb *image.Gray, x, y int, icon [8]byte) {
 	}
 }
 
-// Example 8x8 icons (edit as needed)
 var (
 	IconCPU = [8]byte{
 		0b00111100,
@@ -150,18 +148,14 @@ var (
 	}
 )
 
-// SystemInfoScreen draws system info and icons
-// (uses /proc/meminfo, /proc/stat, and df for Linux)
 type SystemInfoScreen struct{}
 
 func (s *SystemInfoScreen) Draw(fb *image.Gray) {
-	// Draw icons with reduced margins
 	DrawIcon(fb, 0, 2, IconCPU)
 	DrawIcon(fb, 0, 18, IconRAM)
 	DrawIcon(fb, 0, 34, IconDisk)
 	DrawIcon(fb, 0, 50, IconClock)
 
-	// Draw labels and values
 	face := basicfont.Face7x13
 	d := &font.Drawer{
 		Dst:  fb,
@@ -169,7 +163,6 @@ func (s *SystemInfoScreen) Draw(fb *image.Gray) {
 		Face: face,
 	}
 
-	// CPU usage
 	cpuUsage := getCPUUsage()
 	d.Dot = fixed.P(10, 12)
 	d.DrawString(fmt.Sprintf("CPU: %2.0f%%", cpuUsage))
@@ -190,7 +183,6 @@ func (s *SystemInfoScreen) Draw(fb *image.Gray) {
 	d.DrawString(fmt.Sprintf("UPT: %s", uptime))
 }
 
-// getCPUUsage returns CPU usage percent (Linux, simple 100ms sample)
 func getCPUUsage() float64 {
 	f, err := os.Open("/proc/stat")
 	if err != nil {
@@ -214,7 +206,6 @@ func getCPUUsage() float64 {
 	return 100.0 * (1.0 - deltaIdle/deltaTotal)
 }
 
-// getMemInfo returns used and total memory in MB (Linux)
 func getMemInfo() (used, total int) {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {
@@ -248,7 +239,6 @@ func getMemInfo() (used, total int) {
 	return
 }
 
-// getDiskInfo returns used and total disk in GB (Linux, root fs)
 func getDiskInfo() (used, total int) {
 	var stat syscall.Statfs_t
 	err := syscall.Statfs("/", &stat)
@@ -260,7 +250,6 @@ func getDiskInfo() (used, total int) {
 	return
 }
 
-// getUptime returns the system uptime as a human-readable string (Linux)
 func getUptime() string {
 	f, err := os.Open("/proc/uptime")
 	if err != nil {
@@ -345,7 +334,6 @@ func main() {
 	var requestedScreen int32 = 0
 	redrawChan := make(chan struct{}, 1)
 
-	// Goroutine to read keycodes from serial port and update screen index immediately
 	go func() {
 		buf := make([]byte, 1)
 		for {
@@ -390,7 +378,6 @@ func main() {
 			firstIteration = false
 		}
 
-		// Wait for either a redraw request or the next timer tick
 		var doRedraw bool
 		select {
 		case <-redrawChan:
@@ -435,8 +422,8 @@ func main() {
 			}
 
 			cols := make([]byte, expectedPixelDataSize)
-			for j := 0; j < bytesPerScanline; j++ {
-				for k := 0; k < expectedImageHeight; k++ {
+			for j := range bytesPerScanline {
+				for k := range expectedImageHeight {
 					scanlineBlockStartOffset := k * bytesPerScanline
 					currentByteOffsetInSource := scanlineBlockStartOffset + j
 					if currentByteOffsetInSource >= len(reorderedScanlines) {
@@ -476,7 +463,9 @@ func main() {
 			}
 
 			writeSerial([]byte{0x1B, 0x47})
-			time.Sleep(sleepDuration * 100)
+			if firstIteration {
+				time.Sleep(sleepDuration * 100)
+			}
 
 			skipCounter := 0
 			for i := 0; i < len(cols); i += 64 {
@@ -484,13 +473,8 @@ func main() {
 				if skipCounter%2 == 0 {
 					continue
 				}
-				limit := i + 64
-				if limit > len(cols) {
-					limit = len(cols)
-				}
-				for j := i; j < limit; j++ {
-					writeSerial([]byte{cols[j]})
-				}
+				limit := min(i+64, len(cols))
+				writeSerial(cols[i:limit])
 			}
 
 			skipCounter = 0
@@ -499,13 +483,8 @@ func main() {
 				if skipCounter%2 != 0 {
 					continue
 				}
-				limit := i + 64
-				if limit > len(cols) {
-					limit = len(cols)
-				}
-				for j := i; j < limit; j++ {
-					writeSerial([]byte{cols[j]})
-				}
+				limit := min(i+64, len(cols))
+				writeSerial(cols[i:limit])
 			}
 
 			fmt.Printf("Screen: %s\n", screens[currentScreen].name)
