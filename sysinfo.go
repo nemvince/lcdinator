@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
-	"net"
+	gonet "net"
 	"os"
 	"syscall"
 	"time"
+
+	psnet "github.com/shirou/gopsutil/v3/net"
 )
 
 func GetCPUUsage() float64 {
@@ -104,54 +106,41 @@ type NetInterfaceInfo struct {
 	Signal int   // dBm, -1 if not wireless
 }
 
-var prevNetStats = make(map[string][2]int64)
-var prevNetTime = time.Now()
+// For bandwidth calculation using gopsutil
+var prevIOCounters = make(map[string][2]uint64)
+var prevIOTimestamp = time.Now()
 
 func GetNetworkInterfaces() ([]NetInterfaceInfo, error) {
 	var result []NetInterfaceInfo
-	ifaces, err := net.Interfaces()
+	ifaces, err := gonet.Interfaces()
 	if err != nil {
 		return nil, err
 	}
-	// Get stats for bandwidth
-	stats := make(map[string][2]int64)
-	f, err := os.Open("/proc/net/dev")
-	if err == nil {
-		defer f.Close()
-		var line string
-		for range 2 {
-			fmt.Fscanln(f, &line)
-		} // skip headers
-		for {
-			_, err := fmt.Fscanln(f, &line)
-			if err != nil {
-				break
-			}
-			var name string
-			var rx, tx int64
-			fmt.Sscanf(line, "%s %d %*d %*d %*d %*d %*d %*d %*d %d", &name, &rx, &tx)
-			name = name[:len(name)-1] // remove :
-			stats[name] = [2]int64{rx, tx}
-		}
+	ioStats, _ := psnet.IOCounters(true)
+	now := time.Now()
+	dt := now.Sub(prevIOTimestamp).Seconds()
+	prevIOTimestamp = now
+	ioMap := make(map[string]psnet.IOCountersStat)
+	for _, stat := range ioStats {
+		ioMap[stat.Name] = stat
 	}
-	dt := time.Since(prevNetTime).Seconds()
-	prevNetTime = time.Now()
 	for _, iface := range ifaces {
-		info := NetInterfaceInfo{Name: iface.Name, Up: iface.Flags&net.FlagUp != 0, RxRate: -1, TxRate: -1, Signal: -1}
+		info := NetInterfaceInfo{Name: iface.Name, Up: iface.Flags&gonet.FlagUp != 0, RxRate: 0, TxRate: 0, Signal: -1}
 		addrs, _ := iface.Addrs()
 		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
+			if ipnet, ok := addr.(*gonet.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
 				info.IP = ipnet.IP.String()
 			}
 		}
-		if s, ok := stats[iface.Name]; ok {
-			if prev, ok := prevNetStats[iface.Name]; ok && dt > 0 {
-				info.RxRate = int64(float64(s[0]-prev[0]) / dt)
-				info.TxRate = int64(float64(s[1]-prev[1]) / dt)
+		if stat, ok := ioMap[iface.Name]; ok && dt > 0 {
+			prev, ok := prevIOCounters[iface.Name]
+			if ok {
+				info.RxRate = int64(float64(stat.BytesRecv-prev[0]) / dt)
+				info.TxRate = int64(float64(stat.BytesSent-prev[1]) / dt)
 			}
-			prevNetStats[iface.Name] = s
+			prevIOCounters[iface.Name] = [2]uint64{stat.BytesRecv, stat.BytesSent}
 		}
-		// Try to get signal strength for wireless
+		// Signal strength (unchanged)
 		if _, err := os.Stat("/proc/net/wireless"); err == nil {
 			wf, _ := os.Open("/proc/net/wireless")
 			if wf != nil {
