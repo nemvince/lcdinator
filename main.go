@@ -60,6 +60,7 @@ func main() {
 	}
 	screens := []screenDef{
 		{"System Info", &SystemInfoScreen{}},
+		{"Network Info", &NetworkInfoScreen{}},
 		{"About", &AboutScreen{}},
 		{"Menu", &MenuScreen{}},
 	}
@@ -76,6 +77,7 @@ func main() {
 	globalMenuIndex = &menuIndex
 	globalInDialog = &inDialog
 	globalDialogType = &dialogType
+	globalNetIfIndex = new(int32)
 
 	keyHandler := &KeyHandler{
 		RequestedScreen: &requestedScreen,

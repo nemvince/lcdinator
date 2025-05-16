@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"syscall"
 	"time"
@@ -92,4 +93,89 @@ func GetUptime() string {
 		return fmt.Sprintf("%02dh %02dm", hours, minutes)
 	}
 	return fmt.Sprintf("%02dm", minutes)
+}
+
+type NetInterfaceInfo struct {
+	Name   string
+	IP     string
+	Up     bool
+	RxRate int64 // bytes/sec
+	TxRate int64 // bytes/sec
+	Signal int   // dBm, -1 if not wireless
+}
+
+var prevNetStats = make(map[string][2]int64)
+var prevNetTime = time.Now()
+
+func GetNetworkInterfaces() ([]NetInterfaceInfo, error) {
+	var result []NetInterfaceInfo
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	// Get stats for bandwidth
+	stats := make(map[string][2]int64)
+	f, err := os.Open("/proc/net/dev")
+	if err == nil {
+		defer f.Close()
+		var line string
+		for range 2 {
+			fmt.Fscanln(f, &line)
+		} // skip headers
+		for {
+			_, err := fmt.Fscanln(f, &line)
+			if err != nil {
+				break
+			}
+			var name string
+			var rx, tx int64
+			fmt.Sscanf(line, "%s %d %*d %*d %*d %*d %*d %*d %*d %d", &name, &rx, &tx)
+			name = name[:len(name)-1] // remove :
+			stats[name] = [2]int64{rx, tx}
+		}
+	}
+	dt := time.Since(prevNetTime).Seconds()
+	prevNetTime = time.Now()
+	for _, iface := range ifaces {
+		info := NetInterfaceInfo{Name: iface.Name, Up: iface.Flags&net.FlagUp != 0, RxRate: -1, TxRate: -1, Signal: -1}
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
+				info.IP = ipnet.IP.String()
+			}
+		}
+		if s, ok := stats[iface.Name]; ok {
+			if prev, ok := prevNetStats[iface.Name]; ok && dt > 0 {
+				info.RxRate = int64(float64(s[0]-prev[0]) / dt)
+				info.TxRate = int64(float64(s[1]-prev[1]) / dt)
+			}
+			prevNetStats[iface.Name] = s
+		}
+		// Try to get signal strength for wireless
+		if _, err := os.Stat("/proc/net/wireless"); err == nil {
+			wf, _ := os.Open("/proc/net/wireless")
+			if wf != nil {
+				defer wf.Close()
+				var l string
+				for i := 0; i < 2; i++ {
+					fmt.Fscanln(wf, &l)
+				}
+				for {
+					_, err := fmt.Fscanln(wf, &l)
+					if err != nil {
+						break
+					}
+					var wname string
+					var sig int
+					fmt.Sscanf(l, "%s %*d. %d.", &wname, &sig)
+					wname = wname[:len(wname)-1]
+					if wname == iface.Name {
+						info.Signal = sig
+					}
+				}
+			}
+		}
+		result = append(result, info)
+	}
+	return result, nil
 }

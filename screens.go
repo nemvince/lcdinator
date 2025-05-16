@@ -19,10 +19,12 @@ func min(a, b int) int {
 var globalMenuIndex *int32
 var globalInDialog *int32
 var globalDialogType *int32
+var globalNetIfIndex *int32
 
 type SystemInfoScreen struct{}
 type AboutScreen struct{}
 type MenuScreen struct{}
+type NetworkInfoScreen struct{}
 
 func (s *SystemInfoScreen) Draw(fb *image.Gray) {
 	DrawIcon(fb, 0, 2, IconCPU)
@@ -98,4 +100,53 @@ func (s *MenuScreen) Draw(fb *image.Gray) {
 		d.Dot = fixed.P(10, 55)
 		d.DrawString(msg)
 	}
+}
+
+func (s *NetworkInfoScreen) Draw(fb *image.Gray) {
+	face := basicfont.Face7x13
+	d := &font.Drawer{
+		Dst:  fb,
+		Src:  image.Black,
+		Face: face,
+	}
+	ifaces, _ := GetNetworkInterfaces()
+	idx := 0
+	if globalNetIfIndex != nil {
+		idx = int(*globalNetIfIndex)
+	}
+	numIfaces := len(ifaces)
+	if numIfaces == 0 {
+		d.Dot = fixed.P(0, 16)
+		d.DrawString("No interfaces")
+		return
+	}
+	if idx < 0 || idx >= numIfaces {
+		idx = 0
+	}
+	iface := ifaces[idx]
+	// Name and status, with (idx/n)
+	DrawIcon(fb, 0, 4, IconPlug)
+	d.Dot = fixed.P(10, 12)
+	d.DrawString(fmt.Sprintf("%s (%d/%d)", iface.Name, idx+1, numIfaces))
+	// IP
+	if iface.IP != "" {
+		DrawIcon(fb, 0, 20, IconNet)
+		d.Dot = fixed.P(10, 28)
+		d.DrawString(fmt.Sprintf("IP: %s", iface.IP))
+	} else {
+		DrawIcon(fb, 0, 20, IconNetError)
+		d.Dot = fixed.P(10, 28)
+		status := "Down"
+		if iface.Up {
+			status = "Up"
+		}
+		d.DrawString(fmt.Sprintf("%s, no IP", status))
+	}
+	// Bandwidth (always show, even if 0)
+	DrawIcon(fb, 0, 36, IconArrowUp)
+	d.Dot = fixed.P(10, 44)
+	d.DrawString(fmt.Sprintf("RX: %d KB/s", iface.RxRate/1024))
+	DrawIcon(fb, 0, 52, IconArrowDown)
+	d.Dot = fixed.P(10, 60)
+	d.DrawString(fmt.Sprintf("TX: %d KB/s", iface.TxRate/1024))
 }

@@ -91,6 +91,35 @@ func (kh *KeyHandler) handleKey(key byte) bool {
 		}
 		return changed
 	}
+	// Add cycling for Network Info screen (screen 1)
+	if atomic.LoadInt32(kh.RequestedScreen) == 1 {
+		switch key {
+		case KEY_UP:
+			if globalNetIfIndex != nil {
+				ifaces, _ := GetNetworkInterfaces()
+				if len(ifaces) > 0 {
+					if *globalNetIfIndex > 0 {
+						atomic.AddInt32(globalNetIfIndex, -1)
+					} else {
+						atomic.StoreInt32(globalNetIfIndex, int32(len(ifaces)-1))
+					}
+					changed = true
+				}
+			}
+		case KEY_DOWN:
+			if globalNetIfIndex != nil {
+				ifaces, _ := GetNetworkInterfaces()
+				if len(ifaces) > 0 {
+					if int(*globalNetIfIndex) < len(ifaces)-1 {
+						atomic.AddInt32(globalNetIfIndex, 1)
+					} else {
+						atomic.StoreInt32(globalNetIfIndex, 0)
+					}
+					changed = true
+				}
+			}
+		}
+	}
 	switch key {
 	case KEY_ENTER: // ok
 		if atomic.LoadInt32(kh.RequestedScreen) != 0 {
