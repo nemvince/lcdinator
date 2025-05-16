@@ -117,7 +117,6 @@ func main() {
 		}
 
 		if doRedraw {
-
 			if atomic.LoadInt32(&dialogResult) == 1 {
 				if atomic.LoadInt32(&dialogType) == 1 {
 					// Shutdown
@@ -186,8 +185,8 @@ func main() {
 			}
 
 			cols := make([]byte, expectedPixelDataSize)
-			for j := 0; j < bytesPerScanline; j++ {
-				for k := 0; k < expectedImageHeight; k++ {
+			for j := range bytesPerScanline {
+				for k := range expectedImageHeight {
 					scanlineBlockStartOffset := k * bytesPerScanline
 					currentByteOffsetInSource := scanlineBlockStartOffset + j
 					if currentByteOffsetInSource >= len(reorderedScanlines) {
