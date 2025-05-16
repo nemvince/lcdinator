@@ -2,12 +2,17 @@ package main
 
 import (
 	"fmt"
-	"io"
+	"image"
+	"image/color"
+	"image/draw"
 	"log"
 	"os"
 	"time"
 
 	"go.bug.st/serial" // External dependency: go get go.bug.st/serial
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/basicfont"
+	"golang.org/x/image/math/fixed"
 )
 
 // Copyright (c) 2021 arx.net - Thanos Chatziathanassiou . All rights reserved.
@@ -25,7 +30,6 @@ import (
 // - make the BMP parser works with stuff other than imagemagick
 //   (This Go version also uses the hardcoded offset)
 
-const bmpPixelDataOffset = 0x82          // Hardcoded offset for ImageMagick BMPs
 const defaultSerialDevice = "/dev/ttyS1" // Default for Checkpoint 12200 / P210 on Linux
 const expectedImageWidth = 128
 const expectedImageHeight = 64
@@ -54,33 +58,54 @@ func findAddIdx(scanlineNumTimes16 int) (addVal int, idxBase int) {
 	return
 }
 
+func renderTextToFramebuffer(text string) []byte {
+	img := image.NewGray(image.Rect(0, 0, expectedImageWidth, expectedImageHeight))
+	draw.Draw(img, img.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
+
+	face := basicfont.Face7x13
+	d := &font.Drawer{
+		Dst:  img,
+		Src:  image.Black,
+		Face: face,
+		Dot:  fixed.P(0, face.Ascent),
+	}
+	d.DrawString(text)
+
+	bytesPerScanline := expectedImageWidth / 8
+	framebuffer := make([]byte, bytesPerScanline*expectedImageHeight)
+
+	for y := 0; y < expectedImageHeight; y++ {
+		for xByte := 0; xByte < bytesPerScanline; xByte++ {
+			var b byte
+			for bit := 0; bit < 8; bit++ {
+				x := xByte*8 + bit
+				if x >= expectedImageWidth {
+					continue
+				}
+				if img.GrayAt(x, y).Y < 128 {
+					b |= 1 << (7 - bit)
+				}
+			}
+			framebuffer[y*bytesPerScanline+xByte] = b
+		}
+	}
+	return framebuffer
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <bmp_file> [serial_device]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s <text_to_render> [serial_device]\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Default serial device: %s\n", defaultSerialDevice)
 		os.Exit(1)
 	}
-	bmpFilePath := os.Args[1]
+	textToRender := os.Args[1]
 	serialDevice := defaultSerialDevice
 	if len(os.Args) > 2 {
 		serialDevice = os.Args[2]
 	}
 
-	file, err := os.Open(bmpFilePath)
-	if err != nil {
-		log.Fatalf("Cannot open BMP file %s: %v\n", bmpFilePath, err)
-	}
-	defer file.Close()
-
-	_, err = file.Seek(bmpPixelDataOffset, io.SeekStart)
-	if err != nil {
-		log.Fatalf("Cannot seek in BMP file %s: %v\n", bmpFilePath, err)
-	}
-
-	bytesFromFile, err := io.ReadAll(file)
-	if err != nil {
-		log.Fatalf("Cannot read pixel data from BMP file %s: %v\n", bmpFilePath, err)
-	}
+	// Generate framebuffer from text
+	bytesFromFile := renderTextToFramebuffer(textToRender)
 
 	bytesPerScanline := expectedImageWidth / 8
 	expectedPixelDataSize := bytesPerScanline * expectedImageHeight
