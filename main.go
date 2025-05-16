@@ -75,6 +75,7 @@ func renderTextToFramebuffer(text string) []byte {
 	framebuffer := make([]byte, bytesPerScanline*expectedImageHeight)
 
 	for y := 0; y < expectedImageHeight; y++ {
+		flippedY := expectedImageHeight - 1 - y // vertical flip
 		for xByte := 0; xByte < bytesPerScanline; xByte++ {
 			var b byte
 			for bit := 0; bit < 8; bit++ {
@@ -82,7 +83,7 @@ func renderTextToFramebuffer(text string) []byte {
 				if x >= expectedImageWidth {
 					continue
 				}
-				if img.GrayAt(x, y).Y < 128 {
+				if img.GrayAt(x, flippedY).Y < 128 {
 					b |= 1 << (7 - bit)
 				}
 			}
@@ -218,7 +219,7 @@ func main() {
 			limit = len(cols)
 		}
 		for j := i; j < limit; j++ {
-			writeSerial([]byte{cols[j] ^ 0xff})
+			writeSerial([]byte{cols[j]})
 		}
 	}
 
@@ -233,7 +234,7 @@ func main() {
 			limit = len(cols)
 		}
 		for j := i; j < limit; j++ {
-			writeSerial([]byte{cols[j] ^ 0xff})
+			writeSerial([]byte{cols[j]})
 		}
 	}
 
