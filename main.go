@@ -7,6 +7,7 @@ import (
 	"image/draw"
 	"log"
 	"os"
+	"syscall"
 	"time"
 
 	"go.bug.st/serial" // External dependency: go get go.bug.st/serial
@@ -14,21 +15,6 @@ import (
 	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/math/fixed"
 )
-
-// Copyright (c) 2021 arx.net - Thanos Chatziathanassiou . All rights reserved.
-// This program is free software; you can redistribute it and/or
-// modify it under the same terms as Perl itself.
-// See [http://www.perl.com/perl/misc/Artistic.html](http://www.perl.com/perl/misc/Artistic.html)
-//
-// This Go program is a translation of the original Perl script.
-// Based on work done by Saint-Frater on https://git.nox-rhea.org/globals/reverse-engineering/ezio-g500
-
-// TODOs from original Perl script (still apply or are addressed):
-// - make sure the serial port is in working condition without stty
-//   (go.bug.st/serial usually handles this well on POSIX)
-// - probably rewrite in C or Rust (This is a Go rewrite)
-// - make the BMP parser works with stuff other than imagemagick
-//   (This Go version also uses the hardcoded offset)
 
 const defaultSerialDevice = "/dev/ttyS1" // Default for Checkpoint 12200 / P210 on Linux
 const expectedImageWidth = 128
@@ -58,32 +44,47 @@ func findAddIdx(scanlineNumTimes16 int) (addVal int, idxBase int) {
 	return
 }
 
-func renderTextToFramebuffer(text string) []byte {
-	img := image.NewGray(image.Rect(0, 0, expectedImageWidth, expectedImageHeight))
-	draw.Draw(img, img.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
+// Drawable is anything that can draw itself on a framebuffer.
+type Drawable interface {
+	Draw(fb *image.Gray)
+}
 
-	face := basicfont.Face7x13
-	d := &font.Drawer{
-		Dst:  img,
-		Src:  image.Black,
-		Face: face,
-		Dot:  fixed.P(0, face.Ascent),
+// Display represents the LCD framebuffer and serial logic.
+type Display struct {
+	Width, Height int
+	Framebuffer   *image.Gray
+}
+
+func NewDisplay(width, height int) *Display {
+	return &Display{
+		Width:       width,
+		Height:      height,
+		Framebuffer: image.NewGray(image.Rect(0, 0, width, height)),
 	}
-	d.DrawString(text)
+}
 
-	bytesPerScanline := expectedImageWidth / 8
-	framebuffer := make([]byte, bytesPerScanline*expectedImageHeight)
+func (d *Display) Clear() {
+	draw.Draw(d.Framebuffer, d.Framebuffer.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
+}
 
-	for y := 0; y < expectedImageHeight; y++ {
-		flippedY := expectedImageHeight - 1 - y // vertical flip
+func (d *Display) DrawDrawable(dr Drawable) {
+	dr.Draw(d.Framebuffer)
+}
+
+// Packs the framebuffer into the display's expected byte format (monochrome, 1bpp, bottom-up)
+func (d *Display) Pack() []byte {
+	bytesPerScanline := d.Width / 8
+	framebuffer := make([]byte, bytesPerScanline*d.Height)
+	for y := 0; y < d.Height; y++ {
+		flippedY := d.Height - 1 - y // vertical flip
 		for xByte := 0; xByte < bytesPerScanline; xByte++ {
 			var b byte
 			for bit := 0; bit < 8; bit++ {
 				x := xByte*8 + bit
-				if x >= expectedImageWidth {
+				if x >= d.Width {
 					continue
 				}
-				if img.GrayAt(x, flippedY).Y < 128 {
+				if d.Framebuffer.GrayAt(x, flippedY).Y < 128 {
 					b |= 1 << (7 - bit)
 				}
 			}
@@ -93,20 +94,200 @@ func renderTextToFramebuffer(text string) []byte {
 	return framebuffer
 }
 
-func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <text_to_render> [serial_device]\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Default serial device: %s\n", defaultSerialDevice)
-		os.Exit(1)
+// DrawIcon draws a small monochrome icon at (x, y) using an 8x8 bitmap.
+func DrawIcon(fb *image.Gray, x, y int, icon [8]byte) {
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 8; col++ {
+			if (icon[row]>>(7-col))&1 == 1 {
+				fb.SetGray(x+col, y+row, color.Gray{Y: 0}) // Use color.Gray for black
+			}
+		}
 	}
-	textToRender := os.Args[1]
-	serialDevice := defaultSerialDevice
-	if len(os.Args) > 2 {
-		serialDevice = os.Args[2]
+}
+
+// Example 8x8 icons (edit as needed)
+var (
+	IconCPU = [8]byte{
+		0b00111100,
+		0b01000010,
+		0b10100101,
+		0b10111101,
+		0b10111101,
+		0b10100101,
+		0b01000010,
+		0b00111100,
+	}
+	IconRAM = [8]byte{
+		0b11111111,
+		0b10011001,
+		0b10111101,
+		0b10111101,
+		0b10111101,
+		0b10111101,
+		0b10011001,
+		0b11111111,
+	}
+	IconDisk = [8]byte{
+		0b00111100,
+		0b01000010,
+		0b10011001,
+		0b10111101,
+		0b10111101,
+		0b10011001,
+		0b01000010,
+		0b00111100,
+	}
+	IconClock = [8]byte{
+		0b00111100,
+		0b01000010,
+		0b10011001,
+		0b10100101,
+		0b10100001,
+		0b10011001,
+		0b01000010,
+		0b00111100,
+	}
+)
+
+// SystemInfoScreen draws system info and icons
+// (uses /proc/meminfo, /proc/stat, and df for Linux)
+type SystemInfoScreen struct{}
+
+func (s *SystemInfoScreen) Draw(fb *image.Gray) {
+	// Draw icons with reduced margins
+	DrawIcon(fb, 0, 2, IconCPU)
+	DrawIcon(fb, 0, 18, IconRAM)
+	DrawIcon(fb, 0, 34, IconDisk)
+	DrawIcon(fb, 0, 50, IconClock)
+
+	// Draw labels and values
+	face := basicfont.Face7x13
+	d := &font.Drawer{
+		Dst:  fb,
+		Src:  image.Black,
+		Face: face,
 	}
 
-	// Generate framebuffer from text
-	bytesFromFile := renderTextToFramebuffer(textToRender)
+	// CPU usage
+	cpuUsage := getCPUUsage()
+	d.Dot = fixed.P(6, 12)
+	d.DrawString(fmt.Sprintf("CPU: %2.0f%%", cpuUsage))
+
+	// RAM usage
+	memUsed, memTotal := getMemInfo()
+	d.Dot = fixed.P(10, 28)
+	d.DrawString(fmt.Sprintf("RAM: %d/%d MB", memUsed, memTotal))
+
+	// Disk usage
+	diskUsed, diskTotal := getDiskInfo()
+	d.Dot = fixed.P(10, 44)
+	d.DrawString(fmt.Sprintf("DSK: %d/%d GB", diskUsed, diskTotal))
+
+	// Uptime
+	uptime := getUptime()
+	d.Dot = fixed.P(10, 60)
+	d.DrawString(fmt.Sprintf("UPT: %s", uptime))
+}
+
+// getCPUUsage returns CPU usage percent (Linux, simple 100ms sample)
+func getCPUUsage() float64 {
+	f, err := os.Open("/proc/stat")
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	var user1, nice1, system1, idle1, iowait1, irq1, softirq1, steal1 uint64
+	fmt.Fscanf(f, "cpu  %d %d %d %d %d %d %d %d", &user1, &nice1, &system1, &idle1, &iowait1, &irq1, &softirq1, &steal1)
+	total1 := user1 + nice1 + system1 + idle1 + iowait1 + irq1 + softirq1 + steal1
+	idleAll1 := idle1 + iowait1
+	time.Sleep(100 * time.Millisecond)
+	f.Seek(0, 0)
+	fmt.Fscanf(f, "cpu  %d %d %d %d %d %d %d %d", &user1, &nice1, &system1, &idle1, &iowait1, &irq1, &softirq1, &steal1)
+	total2 := user1 + nice1 + system1 + idle1 + iowait1 + irq1 + softirq1 + steal1
+	idleAll2 := idle1 + iowait1
+	deltaTotal := float64(total2 - total1)
+	deltaIdle := float64(idleAll2 - idleAll1)
+	if deltaTotal == 0 {
+		return 0
+	}
+	return 100.0 * (1.0 - deltaIdle/deltaTotal)
+}
+
+// getMemInfo returns used and total memory in MB (Linux)
+func getMemInfo() (used, total int) {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0, 0
+	}
+	defer f.Close()
+	var memTotal, memFree, buffers, cached int
+	scan := func() {
+		var label string
+		var value int
+		for {
+			_, err := fmt.Fscanf(f, "%s %d kB\n", &label, &value)
+			if err != nil {
+				break
+			}
+			switch label {
+			case "MemTotal:":
+				memTotal = value
+			case "MemFree:":
+				memFree = value
+			case "Buffers:":
+				buffers = value
+			case "Cached:":
+				cached = value
+			}
+		}
+	}
+	scan()
+	total = memTotal / 1024
+	used = (memTotal - memFree - buffers - cached) / 1024
+	return
+}
+
+// getDiskInfo returns used and total disk in GB (Linux, root fs)
+func getDiskInfo() (used, total int) {
+	var stat syscall.Statfs_t
+	err := syscall.Statfs("/", &stat)
+	if err != nil {
+		return 0, 0
+	}
+	total = int((stat.Blocks * uint64(stat.Bsize)) / (1024 * 1024 * 1024))
+	used = int(((stat.Blocks - stat.Bfree) * uint64(stat.Bsize)) / (1024 * 1024 * 1024))
+	return
+}
+
+// getUptime returns the system uptime as a human-readable string (Linux)
+func getUptime() string {
+	f, err := os.Open("/proc/uptime")
+	if err != nil {
+		return "?"
+	}
+	defer f.Close()
+	var uptimeSeconds float64
+	fmt.Fscanf(f, "%f", &uptimeSeconds)
+	days := int(uptimeSeconds) / 86400
+	hours := (int(uptimeSeconds) % 86400) / 3600
+	minutes := (int(uptimeSeconds) % 3600) / 60
+	if days > 0 {
+		return fmt.Sprintf("%dd %02dh %02dm", days, hours, minutes)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%02dh %02dm", hours, minutes)
+	}
+	return fmt.Sprintf("%02dm", minutes)
+}
+
+func main() {
+	display := NewDisplay(expectedImageWidth, expectedImageHeight)
+	display.Clear()
+
+	screen := &SystemInfoScreen{}
+	display.DrawDrawable(screen)
+
+	bytesFromFile := display.Pack()
 
 	bytesPerScanline := expectedImageWidth / 8
 	expectedPixelDataSize := bytesPerScanline * expectedImageHeight
@@ -174,6 +355,11 @@ func main() {
 		}
 	}
 
+	serialDevice := defaultSerialDevice
+	if len(os.Args) > 1 {
+		serialDevice = os.Args[1]
+	}
+
 	mode := &serial.Mode{
 		BaudRate: 115200,
 		DataBits: 8,
@@ -238,6 +424,6 @@ func main() {
 		}
 	}
 
-	fmt.Println("Image data sent to LCD.")
+	fmt.Println("System info sent to LCD.")
 	time.Sleep(sleepDuration)
 }
