@@ -7,6 +7,7 @@ import (
 	"image/draw"
 	"log"
 	"os"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -291,10 +292,12 @@ func (s *AboutScreen) Draw(fb *image.Gray) {
 		Src:  image.Black,
 		Face: face,
 	}
-	d.Dot = fixed.P(10, 20)
-	d.DrawString("EZIO-G500 LCDinator")
-	d.Dot = fixed.P(10, 40)
-	d.DrawString("github.com/nya")
+	d.Dot = fixed.P(0, 12)
+	d.DrawString("LCDinator")
+	d.Dot = fixed.P(0, 28)
+	d.DrawString("by nemvince")
+	d.Dot = fixed.P(0, 60)
+	d.DrawString("version 1")
 }
 
 func main() {
@@ -339,22 +342,43 @@ func main() {
 	}
 	currentScreen := 0
 
-	// Channel for key events
-	keyChan := make(chan byte, 1)
+	var requestedScreen int32 = 0
+	redrawChan := make(chan struct{}, 1)
 
-	// Goroutine to read keycodes from serial port
+	// Goroutine to read keycodes from serial port and update screen index immediately
 	go func() {
 		buf := make([]byte, 1)
 		for {
 			port.SetReadTimeout(100 * time.Millisecond)
 			n, _ := port.Read(buf)
 			if n == 1 {
-				keyChan <- buf[0]
+				log.Printf("Key pressed: 0x%02X", buf[0])
+				var changed bool
+				if buf[0] == 0x45 { // ok
+					if atomic.LoadInt32(&requestedScreen) != 0 {
+						atomic.StoreInt32(&requestedScreen, 0)
+						changed = true
+					}
+				} else if buf[0] == 0x41 { // help
+					if atomic.LoadInt32(&requestedScreen) != 1 {
+						atomic.StoreInt32(&requestedScreen, 1)
+						changed = true
+					}
+				}
+				if changed {
+					select {
+					case redrawChan <- struct{}{}:
+					default:
+					}
+				}
 			}
 		}
 	}()
 
 	firstIteration := true
+	currentScreen = 0
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 	for {
 		if firstIteration {
 			writeSerial(initCmd())
@@ -366,123 +390,125 @@ func main() {
 			firstIteration = false
 		}
 
-		// Handle key events (example: 0x31 = '1', 0x32 = '2', ...)
+		// Wait for either a redraw request or the next timer tick
+		var doRedraw bool
 		select {
-		case key := <-keyChan:
-			if key == 0x45 { // ok
-				currentScreen = 0
-			} else if key == 0x41 { // help
-				currentScreen = 1
-			} else {
-				log.Printf("Unknown key pressed: 0x%02X", key)
+		case <-redrawChan:
+			doRedraw = true
+		case <-ticker.C:
+			doRedraw = true
+		}
+
+		if doRedraw {
+			newScreen := int(atomic.LoadInt32(&requestedScreen))
+			if newScreen >= 0 && newScreen < len(screens) {
+				currentScreen = newScreen
 			}
-		default:
-		}
 
-		display.Clear()
-		display.DrawDrawable(screens[currentScreen].draw)
-		bytesFromFile := display.Pack()
+			display.Clear()
+			display.DrawDrawable(screens[currentScreen].draw)
+			bytesFromFile := display.Pack()
 
-		bytesPerScanline := expectedImageWidth / 8
-		expectedPixelDataSize := bytesPerScanline * expectedImageHeight
+			bytesPerScanline := expectedImageWidth / 8
+			expectedPixelDataSize := bytesPerScanline * expectedImageHeight
 
-		if len(bytesFromFile) != expectedPixelDataSize {
-			log.Printf("Warning: BMP pixel data size is %d bytes. Expected %d bytes for a %dx%d monochrome image.",
-				len(bytesFromFile), expectedPixelDataSize, expectedImageWidth, expectedImageHeight)
-			if len(bytesFromFile) < expectedPixelDataSize && len(bytesFromFile)%bytesPerScanline == 0 {
-				padding := make([]byte, expectedPixelDataSize-len(bytesFromFile))
-				bytesFromFile = append(bytesFromFile, padding...)
-			} else if len(bytesFromFile) < expectedPixelDataSize {
-				log.Fatalf("Pixel data significantly smaller than expected and not a multiple of scanline size. Aborting.")
+			if len(bytesFromFile) != expectedPixelDataSize {
+				log.Printf("Warning: BMP pixel data size is %d bytes. Expected %d bytes for a %dx%d monochrome image.",
+					len(bytesFromFile), expectedPixelDataSize, expectedImageWidth, expectedImageHeight)
+				if len(bytesFromFile) < expectedPixelDataSize && len(bytesFromFile)%bytesPerScanline == 0 {
+					padding := make([]byte, expectedPixelDataSize-len(bytesFromFile))
+					bytesFromFile = append(bytesFromFile, padding...)
+				} else if len(bytesFromFile) < expectedPixelDataSize {
+					log.Fatalf("Pixel data significantly smaller than expected and not a multiple of scanline size. Aborting.")
+				}
 			}
-		}
 
-		var reorderedScanlines []byte
-		numScanlinesInFile := len(bytesFromFile) / bytesPerScanline
-		for i := numScanlinesInFile - 1; i >= 0; i-- {
-			start := i * bytesPerScanline
-			end := start + bytesPerScanline
-			reorderedScanlines = append(reorderedScanlines, bytesFromFile[start:end]...)
-		}
-		if len(reorderedScanlines) > expectedPixelDataSize {
-			reorderedScanlines = reorderedScanlines[:expectedPixelDataSize]
-		}
+			var reorderedScanlines []byte
+			numScanlinesInFile := len(bytesFromFile) / bytesPerScanline
+			for i := numScanlinesInFile - 1; i >= 0; i-- {
+				start := i * bytesPerScanline
+				end := start + bytesPerScanline
+				reorderedScanlines = append(reorderedScanlines, bytesFromFile[start:end]...)
+			}
+			if len(reorderedScanlines) > expectedPixelDataSize {
+				reorderedScanlines = reorderedScanlines[:expectedPixelDataSize]
+			}
 
-		cols := make([]byte, expectedPixelDataSize)
-		for j := 0; j < bytesPerScanline; j++ {
-			for k := 0; k < expectedImageHeight; k++ {
-				scanlineBlockStartOffset := k * bytesPerScanline
-				currentByteOffsetInSource := scanlineBlockStartOffset + j
-				if currentByteOffsetInSource >= len(reorderedScanlines) {
+			cols := make([]byte, expectedPixelDataSize)
+			for j := 0; j < bytesPerScanline; j++ {
+				for k := 0; k < expectedImageHeight; k++ {
+					scanlineBlockStartOffset := k * bytesPerScanline
+					currentByteOffsetInSource := scanlineBlockStartOffset + j
+					if currentByteOffsetInSource >= len(reorderedScanlines) {
+						continue
+					}
+					currentByte := reorderedScanlines[currentByteOffsetInSource]
+					add, idxBase := findAddIdx(scanlineBlockStartOffset)
+					targetColBase := idxBase + (j * 8)
+					if targetColBase+7 >= len(cols) {
+						continue
+					}
+					if (currentByte & 0x80) != 0 {
+						cols[targetColBase+0] += byte(add)
+					}
+					if (currentByte & 0x40) != 0 {
+						cols[targetColBase+1] += byte(add)
+					}
+					if (currentByte & 0x20) != 0 {
+						cols[targetColBase+2] += byte(add)
+					}
+					if (currentByte & 0x10) != 0 {
+						cols[targetColBase+3] += byte(add)
+					}
+					if (currentByte & 0x08) != 0 {
+						cols[targetColBase+4] += byte(add)
+					}
+					if (currentByte & 0x04) != 0 {
+						cols[targetColBase+5] += byte(add)
+					}
+					if (currentByte & 0x02) != 0 {
+						cols[targetColBase+6] += byte(add)
+					}
+					if (currentByte & 0x01) != 0 {
+						cols[targetColBase+7] += byte(add)
+					}
+				}
+			}
+
+			writeSerial([]byte{0x1B, 0x47})
+			time.Sleep(sleepDuration * 100)
+
+			skipCounter := 0
+			for i := 0; i < len(cols); i += 64 {
+				skipCounter++
+				if skipCounter%2 == 0 {
 					continue
 				}
-				currentByte := reorderedScanlines[currentByteOffsetInSource]
-				add, idxBase := findAddIdx(scanlineBlockStartOffset)
-				targetColBase := idxBase + (j * 8)
-				if targetColBase+7 >= len(cols) {
+				limit := i + 64
+				if limit > len(cols) {
+					limit = len(cols)
+				}
+				for j := i; j < limit; j++ {
+					writeSerial([]byte{cols[j]})
+				}
+			}
+
+			skipCounter = 0
+			for i := 0; i < len(cols); i += 64 {
+				skipCounter++
+				if skipCounter%2 != 0 {
 					continue
 				}
-				if (currentByte & 0x80) != 0 {
-					cols[targetColBase+0] += byte(add)
+				limit := i + 64
+				if limit > len(cols) {
+					limit = len(cols)
 				}
-				if (currentByte & 0x40) != 0 {
-					cols[targetColBase+1] += byte(add)
-				}
-				if (currentByte & 0x20) != 0 {
-					cols[targetColBase+2] += byte(add)
-				}
-				if (currentByte & 0x10) != 0 {
-					cols[targetColBase+3] += byte(add)
-				}
-				if (currentByte & 0x08) != 0 {
-					cols[targetColBase+4] += byte(add)
-				}
-				if (currentByte & 0x04) != 0 {
-					cols[targetColBase+5] += byte(add)
-				}
-				if (currentByte & 0x02) != 0 {
-					cols[targetColBase+6] += byte(add)
-				}
-				if (currentByte & 0x01) != 0 {
-					cols[targetColBase+7] += byte(add)
+				for j := i; j < limit; j++ {
+					writeSerial([]byte{cols[j]})
 				}
 			}
+
+			fmt.Printf("Screen: %s\n", screens[currentScreen].name)
 		}
-
-		writeSerial([]byte{0x1B, 0x47})
-		time.Sleep(sleepDuration * 100)
-
-		skipCounter := 0
-		for i := 0; i < len(cols); i += 64 {
-			skipCounter++
-			if skipCounter%2 == 0 {
-				continue
-			}
-			limit := i + 64
-			if limit > len(cols) {
-				limit = len(cols)
-			}
-			for j := i; j < limit; j++ {
-				writeSerial([]byte{cols[j]})
-			}
-		}
-
-		skipCounter = 0
-		for i := 0; i < len(cols); i += 64 {
-			skipCounter++
-			if skipCounter%2 != 0 {
-				continue
-			}
-			limit := i + 64
-			if limit > len(cols) {
-				limit = len(cols)
-			}
-			for j := i; j < limit; j++ {
-				writeSerial([]byte{cols[j]})
-			}
-		}
-
-		fmt.Printf("Screen: %s\n", screens[currentScreen].name)
-		time.Sleep(time.Second)
 	}
 }
