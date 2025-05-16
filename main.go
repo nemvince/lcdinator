@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -14,6 +13,15 @@ import (
 const defaultSerialDevice = "/dev/ttyS1"
 const expectedImageWidth = 128
 const expectedImageHeight = 64
+
+// screens is now package-level for extensible key handling
+var screens = []Screen{
+	&SystemInfoScreen{},
+	&NetworkInfoScreen{},
+	&AboutScreen{},
+	&MenuScreen{},
+	&ServiceManagerScreen{},
+}
 
 func findAddIdx(scanlineNumTimes16 int) (addVal int, idxBase int) {
 	scanlineGroup := scanlineNumTimes16 / (8 * 16)
@@ -54,16 +62,6 @@ func main() {
 
 	sleepDuration := 5 * time.Millisecond
 
-	type screenDef struct {
-		name string
-		draw Drawable
-	}
-	screens := []screenDef{
-		{"System Info", &SystemInfoScreen{}},
-		{"Network Info", &NetworkInfoScreen{}},
-		{"About", &AboutScreen{}},
-		{"Menu", &MenuScreen{}},
-	}
 	currentScreen := 0
 
 	redrawChan := make(chan struct{}, 1)
@@ -77,7 +75,11 @@ func main() {
 	globalMenuIndex = &menuIndex
 	globalInDialog = &inDialog
 	globalDialogType = &dialogType
+	globalDialogResult = new(int32)
 	globalNetIfIndex = new(int32)
+	globalServiceIndex = new(int32)
+	globalServiceAction = new(int32)
+	globalRequestedScreen = &requestedScreen
 
 	keyHandler := &KeyHandler{
 		RequestedScreen: &requestedScreen,
@@ -114,7 +116,7 @@ func main() {
 		}
 
 		if doRedraw {
-			// Handle command execution if dialog was confirmed
+
 			if atomic.LoadInt32(&dialogResult) == 1 {
 				if atomic.LoadInt32(&dialogType) == 1 {
 					// Shutdown
@@ -130,17 +132,31 @@ func main() {
 				atomic.StoreInt32(&dialogResult, 0)
 			}
 
-			if atomic.LoadInt32(&inMenu) == 1 {
-				currentScreen = 2 // Menu screen
-			} else {
-				newScreen := int(atomic.LoadInt32(&requestedScreen))
-				if newScreen >= 0 && newScreen < 2 {
-					currentScreen = newScreen
-				}
+			newScreen := int(atomic.LoadInt32(&requestedScreen))
+			if newScreen >= 0 && newScreen < len(screens) {
+				currentScreen = newScreen
 			}
 
 			display.Clear()
-			display.DrawDrawable(screens[currentScreen].draw)
+			screens[currentScreen].Draw(display.Framebuffer)
+
+			// Handle menu dialog result (shutdown/reboot)
+			if globalDialogResult != nil && globalDialogType != nil && globalInDialog != nil && atomic.LoadInt32(globalDialogResult) != 0 {
+				if atomic.LoadInt32(globalDialogResult) == 1 {
+					if atomic.LoadInt32(globalDialogType) == 1 {
+						go exec.Command("shutdown", "-h", "now").Start()
+					} else if atomic.LoadInt32(globalDialogType) == 2 {
+						go exec.Command("reboot").Start()
+					}
+				}
+				// Reset all dialog/menu state and return to main screen
+				atomic.StoreInt32(globalMenuIndex, 0)
+				atomic.StoreInt32(globalInDialog, 0)
+				atomic.StoreInt32(globalDialogType, 0)
+				atomic.StoreInt32(globalDialogResult, 0)
+				atomic.StoreInt32(&requestedScreen, 0)
+			}
+
 			bytesFromFile := display.Pack()
 
 			bytesPerScanline := expectedImageWidth / 8
@@ -224,7 +240,6 @@ func main() {
 					writeSerial(cols[i:limit])
 				}
 			}
-			fmt.Printf("Screen: %s\n", screens[currentScreen].name)
 		}
 	}
 }

@@ -50,102 +50,61 @@ func (kh *KeyHandler) Start(port serial.Port) {
 
 func (kh *KeyHandler) handleKey(key byte) bool {
 	changed := false
-	if atomic.LoadInt32(kh.InDialog) == 1 {
-		switch key {
-		case KEY_ENTER:
-			atomic.StoreInt32(kh.DialogResult, 1) // confirmed
-			atomic.StoreInt32(kh.InDialog, 0)
-			atomic.StoreInt32(kh.InMenu, 0)
-			changed = true
-		case KEY_ESC:
-			atomic.StoreInt32(kh.DialogResult, 2) // cancelled
-			atomic.StoreInt32(kh.InDialog, 0)
-			changed = true
-		}
-		return changed
-	}
-	if atomic.LoadInt32(kh.InMenu) == 1 {
-		switch key {
-		case KEY_UP:
-			if atomic.LoadInt32(kh.MenuIndex) > 0 {
-				atomic.AddInt32(kh.MenuIndex, -1)
-				changed = true
-			}
-		case KEY_DOWN:
-			if atomic.LoadInt32(kh.MenuIndex) < 1 { // 2 menu items for now
-				atomic.AddInt32(kh.MenuIndex, 1)
-				changed = true
-			}
-		case KEY_ENTER:
-			// Show confirmation dialog for selected menu item
-			atomic.StoreInt32(kh.InDialog, 1)
-			if atomic.LoadInt32(kh.MenuIndex) == 0 {
-				atomic.StoreInt32(kh.DialogType, 1) // shutdown
-			} else if atomic.LoadInt32(kh.MenuIndex) == 1 {
-				atomic.StoreInt32(kh.DialogType, 2) // reboot
-			}
-			changed = true
-		case KEY_ESC:
-			atomic.StoreInt32(kh.InMenu, 0)
-			changed = true
-		}
-		return changed
-	}
-	// Add cycling for Network Info screen (screen 1)
-	if atomic.LoadInt32(kh.RequestedScreen) == 1 {
-		switch key {
-		case KEY_UP:
-			if globalNetIfIndex != nil {
-				ifaces, _ := GetNetworkInterfaces()
-				if len(ifaces) > 0 {
-					if *globalNetIfIndex > 0 {
-						atomic.AddInt32(globalNetIfIndex, -1)
-					} else {
-						atomic.StoreInt32(globalNetIfIndex, int32(len(ifaces)-1))
-					}
-					changed = true
-				}
-			}
-		case KEY_DOWN:
-			if globalNetIfIndex != nil {
-				ifaces, _ := GetNetworkInterfaces()
-				if len(ifaces) > 0 {
-					if int(*globalNetIfIndex) < len(ifaces)-1 {
-						atomic.AddInt32(globalNetIfIndex, 1)
-					} else {
-						atomic.StoreInt32(globalNetIfIndex, 0)
-					}
-					changed = true
-				}
-			}
-		}
-	}
-	switch key {
-	case KEY_ENTER: // ok
-		if atomic.LoadInt32(kh.RequestedScreen) != 0 {
+	curScreen := int(atomic.LoadInt32(kh.RequestedScreen))
+	// About overlay logic
+	if curScreen == 2 {
+		if key == KEY_ESC {
 			atomic.StoreInt32(kh.RequestedScreen, 0)
 			changed = true
 		}
-	case KEY_HELP:
-		if atomic.LoadInt32(kh.RequestedScreen) != 1 {
-			atomic.StoreInt32(kh.RequestedScreen, 1)
-			changed = true
-		}
+		return changed
+	}
+	// Global screen cycling (skip About)
+	switch key {
 	case KEY_LEFT:
-		if atomic.LoadInt32(kh.RequestedScreen) > 0 {
-			atomic.AddInt32(kh.RequestedScreen, -1)
-			changed = true
+		if curScreen == 0 {
+			curScreen = 4
+		} else if curScreen == 2 {
+			curScreen = 1
+		} else {
+			curScreen--
 		}
+		if curScreen == 2 {
+			curScreen = 1
+		}
+		atomic.StoreInt32(kh.RequestedScreen, int32(curScreen))
+		changed = true
+		return changed
 	case KEY_RIGHT:
-		if atomic.LoadInt32(kh.RequestedScreen) < 2 {
-			atomic.AddInt32(kh.RequestedScreen, 1)
-			changed = true
+		if curScreen == 4 {
+			curScreen = 0
+		} else if curScreen == 1 {
+			curScreen = 3
+		} else {
+			curScreen++
 		}
+		if curScreen == 2 {
+			curScreen = 3
+		}
+		atomic.StoreInt32(kh.RequestedScreen, int32(curScreen))
+		changed = true
+		return changed
+	case KEY_HELP:
+		atomic.StoreInt32(kh.RequestedScreen, 2)
+		changed = true
+		return changed
 	case KEY_ESC:
-		// Enter menu
-		atomic.StoreInt32(kh.InMenu, 1)
+		// Show menu as a real screen
+		atomic.StoreInt32(kh.RequestedScreen, 3)
 		atomic.StoreInt32(kh.MenuIndex, 0)
 		changed = true
+		return changed
+	}
+	// Delegate to current screen's HandleKey
+	if curScreen >= 0 && curScreen < len(screens) {
+		if screens[curScreen].HandleKey(key) {
+			changed = true
+		}
 	}
 	return changed
 }

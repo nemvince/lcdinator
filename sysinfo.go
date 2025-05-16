@@ -4,6 +4,8 @@ import (
 	"fmt"
 	gonet "net"
 	"os"
+	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -167,4 +169,26 @@ func GetNetworkInterfaces() ([]NetInterfaceInfo, error) {
 		result = append(result, info)
 	}
 	return result, nil
+}
+
+func GetRunningServices() []string {
+	cmd := exec.Command("systemctl", "list-units", "--type=service", "--state=running", "--no-legend", "--no-pager")
+	out, err := cmd.Output()
+	if err != nil {
+		return []string{"systemctl error"}
+	}
+	lines := strings.Split(string(out), "\n")
+	var result []string
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			result = append(result, fields[0])
+		}
+	}
+	return result
+}
+
+func ServiceAction(service, action string) {
+	cmd := exec.Command("systemctl", action, service)
+	_ = cmd.Run()
 }
