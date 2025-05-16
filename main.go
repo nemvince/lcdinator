@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"sync/atomic"
 	"time"
 
@@ -60,40 +61,32 @@ func main() {
 	screens := []screenDef{
 		{"System Info", &SystemInfoScreen{}},
 		{"About", &AboutScreen{}},
+		{"Menu", &MenuScreen{}},
 	}
 	currentScreen := 0
 
-	var requestedScreen int32 = 0
 	redrawChan := make(chan struct{}, 1)
 
-	go func() {
-		buf := make([]byte, 1)
-		for {
-			port.SetReadTimeout(100 * time.Millisecond)
-			n, _ := port.Read(buf)
-			if n == 1 {
-				log.Printf("Key pressed: 0x%02X", buf[0])
-				var changed bool
-				if buf[0] == 0x45 { // ok
-					if atomic.LoadInt32(&requestedScreen) != 0 {
-						atomic.StoreInt32(&requestedScreen, 0)
-						changed = true
-					}
-				} else if buf[0] == 0x41 { // help
-					if atomic.LoadInt32(&requestedScreen) != 1 {
-						atomic.StoreInt32(&requestedScreen, 1)
-						changed = true
-					}
-				}
-				if changed {
-					select {
-					case redrawChan <- struct{}{}:
-					default:
-					}
-				}
-			}
-		}
-	}()
+	requestedScreen := int32(0)
+	menuIndex := int32(0)
+	inMenu := int32(0)
+	inDialog := int32(0)
+	dialogType := int32(0)
+	dialogResult := int32(0)
+	globalMenuIndex = &menuIndex
+	globalInDialog = &inDialog
+	globalDialogType = &dialogType
+
+	keyHandler := &KeyHandler{
+		RequestedScreen: &requestedScreen,
+		RedrawChan:      redrawChan,
+		MenuIndex:       &menuIndex,
+		InMenu:          &inMenu,
+		InDialog:        &inDialog,
+		DialogType:      &dialogType,
+		DialogResult:    &dialogResult,
+	}
+	keyHandler.Start(port)
 
 	firstIteration := true
 	currentScreen = 0
@@ -119,9 +112,29 @@ func main() {
 		}
 
 		if doRedraw {
-			newScreen := int(atomic.LoadInt32(&requestedScreen))
-			if newScreen >= 0 && newScreen < len(screens) {
-				currentScreen = newScreen
+			// Handle command execution if dialog was confirmed
+			if atomic.LoadInt32(&dialogResult) == 1 {
+				if atomic.LoadInt32(&dialogType) == 1 {
+					// Shutdown
+					go func() {
+						_ = execCommand("shutdown", "-h", "now")
+					}()
+				} else if atomic.LoadInt32(&dialogType) == 2 {
+					// Reboot
+					go func() {
+						_ = execCommand("reboot")
+					}()
+				}
+				atomic.StoreInt32(&dialogResult, 0)
+			}
+
+			if atomic.LoadInt32(&inMenu) == 1 {
+				currentScreen = 2 // Menu screen
+			} else {
+				newScreen := int(atomic.LoadInt32(&requestedScreen))
+				if newScreen >= 0 && newScreen < 2 {
+					currentScreen = newScreen
+				}
 			}
 
 			display.Clear()
@@ -212,4 +225,10 @@ func main() {
 			fmt.Printf("Screen: %s\n", screens[currentScreen].name)
 		}
 	}
+}
+
+// Add execCommand helper
+func execCommand(name string, arg ...string) error {
+	cmd := exec.Command(name, arg...)
+	return cmd.Start()
 }

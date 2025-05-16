@@ -16,8 +16,13 @@ func min(a, b int) int {
 	return b
 }
 
+var globalMenuIndex *int32
+var globalInDialog *int32
+var globalDialogType *int32
+
 type SystemInfoScreen struct{}
 type AboutScreen struct{}
+type MenuScreen struct{}
 
 func (s *SystemInfoScreen) Draw(fb *image.Gray) {
 	DrawIcon(fb, 0, 2, IconCPU)
@@ -62,4 +67,35 @@ func (s *AboutScreen) Draw(fb *image.Gray) {
 	d.DrawString("by nemvince")
 	d.Dot = fixed.P(0, 60)
 	d.DrawString("version 1")
+}
+
+func (s *MenuScreen) Draw(fb *image.Gray) {
+	face := basicfont.Face7x13
+	d := &font.Drawer{
+		Dst:  fb,
+		Src:  image.Black,
+		Face: face,
+	}
+	menuItems := []string{"Shutdown", "Reboot"}
+	for i, item := range menuItems {
+		y := 16 + i*20
+		if globalMenuIndex != nil && *globalMenuIndex == int32(i) {
+			d.Dot = fixed.P(0, y)
+			d.DrawString("> " + item)
+		} else {
+			d.Dot = fixed.P(0, y)
+			d.DrawString("  " + item)
+		}
+	}
+	// Draw confirmation dialog overlay if needed
+	if globalInDialog != nil && *globalInDialog == 1 && globalDialogType != nil {
+		msg := "Are you sure?"
+		if *globalDialogType == 1 {
+			msg = "Shutdown? (OK/ESC)"
+		} else if *globalDialogType == 2 {
+			msg = "Reboot? (OK/ESC)"
+		}
+		d.Dot = fixed.P(10, 55)
+		d.DrawString(msg)
+	}
 }
