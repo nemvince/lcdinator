@@ -280,6 +280,23 @@ func getUptime() string {
 	return fmt.Sprintf("%02dm", minutes)
 }
 
+// Example AboutScreen
+// (You can add more screens as needed)
+type AboutScreen struct{}
+
+func (s *AboutScreen) Draw(fb *image.Gray) {
+	face := basicfont.Face7x13
+	d := &font.Drawer{
+		Dst:  fb,
+		Src:  image.Black,
+		Face: face,
+	}
+	d.Dot = fixed.P(10, 20)
+	d.DrawString("EZIO-G500 LCDinator")
+	d.Dot = fixed.P(10, 40)
+	d.DrawString("github.com/nya")
+}
+
 func main() {
 	display := NewDisplay(expectedImageWidth, expectedImageHeight)
 	serialDevice := defaultSerialDevice
@@ -311,6 +328,32 @@ func main() {
 
 	sleepDuration := 5 * time.Millisecond
 
+	type screenDef struct {
+		name string
+		draw Drawable
+	}
+	// Add more screens here as needed
+	screens := []screenDef{
+		{"System Info", &SystemInfoScreen{}},
+		{"About", &AboutScreen{}},
+	}
+	currentScreen := 0
+
+	// Channel for key events
+	keyChan := make(chan byte, 1)
+
+	// Goroutine to read keycodes from serial port
+	go func() {
+		buf := make([]byte, 1)
+		for {
+			port.SetReadTimeout(100 * time.Millisecond)
+			n, _ := port.Read(buf)
+			if n == 1 {
+				keyChan <- buf[0]
+			}
+		}
+	}()
+
 	firstIteration := true
 	for {
 		if firstIteration {
@@ -323,9 +366,21 @@ func main() {
 			firstIteration = false
 		}
 
+		// Handle key events (example: 0x31 = '1', 0x32 = '2', ...)
+		select {
+		case key := <-keyChan:
+			if key == 0x45 { // ok
+				currentScreen = 0
+			} else if key == 0x41 { // help
+				currentScreen = 1
+			} else {
+				log.Printf("Unknown key pressed: 0x%02X", key)
+			}
+		default:
+		}
+
 		display.Clear()
-		screen := &SystemInfoScreen{}
-		display.DrawDrawable(screen)
+		display.DrawDrawable(screens[currentScreen].draw)
 		bytesFromFile := display.Pack()
 
 		bytesPerScanline := expectedImageWidth / 8
@@ -427,7 +482,7 @@ func main() {
 			}
 		}
 
-		fmt.Println("System info sent to LCD.")
+		fmt.Printf("Screen: %s\n", screens[currentScreen].name)
 		time.Sleep(time.Second)
 	}
 }
